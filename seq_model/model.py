@@ -122,7 +122,7 @@ class ChatBotModel(object):
         with tf.variable_scope('training') as scope:
             self.global_step = tf.Variable(0, dtype=tf.int32, trainable=False, name='global_step')
             self.learning_rate =  tf.train.exponential_decay(config.LR, self.global_step,
-                                           10000, config.DECAY_FACTOR , staircase=True)
+                                           5000, config.DECAY_FACTOR , staircase=True)
             if not self.fw_only:
                 self.optimizer = tf.train.GradientDescentOptimizer(self.learning_rate)
                 trainables = tf.trainable_variables()

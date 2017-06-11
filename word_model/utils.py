@@ -10,11 +10,12 @@ import nltk
 from nltk.stem import WordNetLemmatizer
 
 class TextLoader():
-    def __init__(self, data_dir, batch_size, seq_length, vocab_size=20000, encoding=None):
+    def __init__(self, data_dir, batch_size, seq_length, sample_count=100000, vocab_size=50000, encoding=None):
         self.data_dir = data_dir
         self.batch_size = batch_size
         self.seq_length = seq_length
         self.vocab_size = vocab_size
+        self.sample_count = sample_count
 
         input_file = os.path.join(data_dir, "yelp_review_data")
         vocab_file = os.path.join(data_dir, "vocab.pkl")
@@ -26,7 +27,7 @@ class TextLoader():
             self.preprocess(input_file, vocab_file, tensor_file, encoding)
         else:
             print("loading preprocessed files")
-            self.load_preprocessed(vocab_file, tensor_file)
+            self.load_preprocessed(vocab_file, tensor_file, encoding)
         self.create_batches()
         self.reset_batch_pointer()
 
@@ -55,20 +56,20 @@ class TextLoader():
     def basic_tokenizer(self, line, normalize_digits=True):
         """ A basic tokenizer to tokenize text into tokens.
         Feel free to change this to suit your need. """
-        """
+        
         line = re.sub('<u>', '', line)
         line = re.sub('</u>', '', line)
         line = re.sub('\[', '', line)
-        line = re.sub('\]', '', line)"""
+        line = re.sub('\]', '', line)
         words = []
-        _WORD_SPLIT = re.compile(b"([.,!?\"'-:;)(])")
+        _WORD_SPLIT = re.compile(b"([.,!?\"-:;)(])")
         _DIGIT_RE = re.compile(r"\d")
         for fragment in line.strip().lower().split():
             for token in re.split(_WORD_SPLIT, fragment):
                 if not token:
                     continue
-                if normalize_digits:
-                    token = re.sub(_DIGIT_RE, b'#', token)
+                #if normalize_digits:
+                    #token = re.sub(_DIGIT_RE, b'#', token)
                 words.append(token)
         return words
 
@@ -91,24 +92,24 @@ class TextLoader():
         
         # Mapping from word to index
         vocabulary = {x: i for i, x in enumerate(vocabulary_inv)}
-
+        del word_counts
         return [vocabulary, vocabulary_inv]
 
     def preprocess(self, input_file, vocab_file, tensor_file, encoding):
         with codecs.open(input_file, "r", encoding=encoding) as f:
-            data = f.read()
+            #data = f.read()
+            x_text = f.readlines(self.sample_count)
 
         # Optional text cleaning or make them lower case, etc.
         #data = self.clean_str(data)
-        x_text = data.split('\n')
+        #x_text = data.split('\n')
 
         all_words = []
         for sentence in x_text:
             all_words.extend(self.basic_tokenizer(sentence))
-        
+        del x_text        
         self.vocab, self.words = self.build_vocab(all_words)
         #self.vocab_size = len(self.words)
-
         with open(vocab_file, 'wb') as f:
             cPickle.dump(self.words, f)
 
@@ -120,9 +121,10 @@ class TextLoader():
         #self.tensor = np.array(list(map(self.vocab.get, x_text)))
         # Save the data to data.npy
         np.save(tensor_file, self.tensor)
-
-    def load_preprocessed(self, vocab_file, tensor_file):
-        with open(vocab_file, 'rb') as f:
+        del all_words
+        
+    def load_preprocessed(self, vocab_file, tensor_file, encoding='utf-8'):
+        with codecs.open(vocab_file, 'rb', encoding='utf-8') as f:
             self.words = cPickle.load(f)
         self.vocab_size = len(self.words)
         self.vocab = dict(zip(self.words, range(len(self.words))))
@@ -144,7 +146,10 @@ class TextLoader():
         ydata[-1] = xdata[0]
         self.x_batches = np.split(xdata.reshape(self.batch_size, -1), self.num_batches, 1)
         self.y_batches = np.split(ydata.reshape(self.batch_size, -1), self.num_batches, 1)
-
+        del xdata
+        del ydata
+        self.tensor = None
+    
     def next_batch(self):
         x, y = self.x_batches[self.pointer], self.y_batches[self.pointer]
         self.pointer += 1

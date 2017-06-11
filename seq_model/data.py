@@ -26,12 +26,13 @@ import numpy as np
 import config
 from nltk.tokenize import sent_tokenize
 import codecs
-
+from collections import OrderedDict
+import itertools
 def get_lines():
     reviews = []
     file_path = os.path.join(config.DATA_PATH, config.LINE_FILE)
     with codecs.open(file_path, "r", encoding='utf8') as f:
-        lines = f.readlines()
+        lines = f.readlines(config.DATA_SIZE)
         for line in lines:
             reviews.append(sent_tokenize(line))
     return reviews
@@ -109,7 +110,8 @@ def build_vocab(filename, normalize_digits=True):
                 vocab[token] += 1
 
     sorted_vocab = sorted(vocab, key=vocab.get, reverse=True)
-    sorted_vocab  = OrderedDict(itertools.islice(sorted_vocab.iteritems(), config.VOCAB_SIZE))
+#    sorted_vocab  = OrderedDict(itertools.islice(sorted_vocab.iteritems(), config.VOCAB_SIZE))
+    sorted_vocab = sorted_vocab[:config.VOCAB_SIZE]
     with open(out_path, 'wb') as f:
         f.write('<pad>' + '\n')
         f.write('<unk>' + '\n')
@@ -162,7 +164,7 @@ def prepare_raw_data():
     print('Preparing raw data into train set and test set ...')
     reviews = get_lines()
     questions, answers = question_answers(reviews)
-    #prepare_dataset(questions, answers)
+    prepare_dataset(questions, answers)
 
 def process_data():
     print('Preparing data to be model-ready ...')

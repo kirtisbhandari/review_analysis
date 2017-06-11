@@ -9,6 +9,7 @@ from six.moves import cPickle
 
 from utils import TextLoader
 from model import Model
+import gc
 
 def main():
     parser = argparse.ArgumentParser()
@@ -20,21 +21,23 @@ def main():
                        help='directory containing tensorboard logs')
     parser.add_argument('--save_dir', type=str, default='save',
                        help='directory to store checkpointed models')
-    parser.add_argument('--rnn_size', type=int, default=64,
+    parser.add_argument('--rnn_size', type=int, default=128,
                        help='size of RNN hidden state')
-    parser.add_argument('--vocab_size', type=int, default=20000,
+    parser.add_argument('--data_size', type=int, default=100000,
+                       help='size of data to train on') 
+    parser.add_argument('--vocab_size', type=int, default=40000,
                        help='size of vocabulary') 
     parser.add_argument('--num_layers', type=int, default=2,
                        help='number of layers in the RNN')
     parser.add_argument('--model', type=str, default='lstm',
                        help='rnn, gru, or lstm')
-    parser.add_argument('--batch_size', type=int, default=50,
+    parser.add_argument('--batch_size', type=int, default=200,
                        help='minibatch size')
     parser.add_argument('--seq_length', type=int, default=25,
                        help='RNN sequence length')
-    parser.add_argument('--num_epochs', type=int, default=50,
+    parser.add_argument('--num_epochs', type=int, default=10,
                        help='number of epochs')
-    parser.add_argument('--save_every', type=int, default=1000,
+    parser.add_argument('--save_every', type=int, default=500,
                        help='save frequency')
     parser.add_argument('--grad_clip', type=float, default=5.,
                        help='clip gradients at this value')
@@ -54,10 +57,11 @@ def main():
                         """)
     args = parser.parse_args()
     train(args)
+    gc.collect()
 
 def train(args):
-    data_loader = TextLoader(args.data_dir, args.batch_size, args.seq_length, args.vocab_size, args.input_encoding)
-
+    data_loader = TextLoader(args.data_dir, args.batch_size, args.seq_length, args.data_size, args.vocab_size, args.input_encoding)
+    print_config(args)
     # check compatibility if training is continued from previously saved model
     if args.init_from is not None:
         # check if all necessary files exist
@@ -80,17 +84,20 @@ def train(args):
             saved_words, saved_vocab = cPickle.load(f)
         assert saved_words==data_loader.words, "Data and loaded model disagree on word set!"
         assert saved_vocab==data_loader.vocab, "Data and loaded model disagree on dictionary mappings!"
+        del saved_words
+        del saved_vocab
 
     with open(os.path.join(args.save_dir, 'config.pkl'), 'wb') as f:
         cPickle.dump(args, f)
     with open(os.path.join(args.save_dir, 'words_vocab.pkl'), 'wb') as f:
         cPickle.dump((data_loader.words, data_loader.vocab), f)
+    data_loader.words = None
+    data_loader.vocab = None
 
     model = Model(args)
 
     merged = tf.summary.merge_all()
     train_writer = tf.summary.FileWriter(args.log_dir)
-    gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=args.gpu_mem)
 
     with fix_gpu_memory()  as sess:
         train_writer.add_graph(sess.graph)
@@ -100,7 +107,6 @@ def train(args):
         if args.init_from is not None:
             saver.restore(sess, ckpt.model_checkpoint_path)
         for e in range(model.epoch_pointer.eval(), args.num_epochs):
-            sess.run(tf.assign(model.lr, args.learning_rate * (args.decay_rate ** e)))
             data_loader.reset_batch_pointer()
             state = sess.run(model.initial_state)
             speed = 0
@@ -120,7 +126,7 @@ def train(args):
                 train_writer.add_summary(summary, e * data_loader.num_batches + b)
                 speed = time.time() - start
                 if (e * data_loader.num_batches + b) % args.batch_size == 0:
-                    print("learning rate =  {:.3f},{}/{} (epoch {}), train_loss = {:.4f}, time/batch = {:.3f}" \
+                    print("learning rate =  {:.5f},{}/{} (epoch {}), train_loss = {:.4f}, time/batch = {:.3f}" \
                         .format(model.lr.eval(), e * data_loader.num_batches + b,
                                 args.num_epochs * data_loader.num_batches,
                                 e, train_loss, speed))
@@ -130,6 +136,7 @@ def train(args):
                     saver.save(sess, checkpoint_path, global_step = e * data_loader.num_batches + b)
                     print("model saved to {}".format(checkpoint_path))
         train_writer.close()
+        gc.collect()
 
 def fix_gpu_memory():
     tf_config = tf.ConfigProto()
@@ -141,6 +148,11 @@ def fix_gpu_memory():
     sess.run(init_op)
     return sess
 
+def print_config(args):
+
+    print("args.data_dir %s, args.rnn_size %d, num_layers %d, args.batch_size %d, args.seq_length %d, args.data_size %d, args.num_epochs %d, args.vocab_size %d, args.input_encoding %s, args.learning_rate %f" 
+           %( args.data_dir, args.rnn_size, args.num_layers, args.batch_size, args.seq_length, args.data_size,
+            args.num_epochs, args.vocab_size, args.input_encoding, args.learning_rate))
 
 
 if __name__ == '__main__':

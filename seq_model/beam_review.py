@@ -1,3 +1,4 @@
+from __future__ import division
 from __future__ import print_function
 
 import argparse
@@ -13,6 +14,8 @@ from model import ChatBotModel
 import config
 import data
 import gc
+import heapq
+import numpy as np
 
 def _get_random_bucket(train_buckets_scale):
     """ Get a random bucket from which to choose a training sample """
@@ -32,7 +35,6 @@ def _assert_lengths(encoder_size, decoder_size, encoder_inputs, decoder_inputs, 
     if len(decoder_masks) != decoder_size:
         raise ValueError("Weights length must be equal to the one in bucket,"
                        " %d != %d." % (len(decoder_masks), decoder_size))
-
 
 def run_step(sess, model, encoder_inputs, decoder_inputs, decoder_masks, bucket_id, forward_only):
     """ Run one step in training.
@@ -143,7 +145,7 @@ def train():
             iteration += 1
 
             if iteration % skip_step == 0:
-                print('Iter {}: lr {}, loss {}, time {}'.format(iteration, model.learning_rate.eval(), total_loss/skip_step, time.time() - start))
+                print('Iter {}: LR {}, loss {}, time {}'.format(iteration, model.learning_rate.eval(), total_loss/skip_step, time.time() - start))
                 start = time.time()
                 total_loss = 0
                 saver.save(sess, os.path.join(config.CPT_PATH, 'chatbot'), global_step=model.global_step)
@@ -165,13 +167,14 @@ def _find_right_bucket(length):
     return min([b for b in xrange(len(config.BUCKETS))
                 if config.BUCKETS[b][0] >= length])
 
+"""
 def _construct_response(output_logits, inv_dec_vocab):
-    """ Construct a response to the user's encoder input.
+    Construct a response to the user's encoder input.
     @output_logits: the outputs from sequence to sequence wrapper.
     output_logits is decoder_size np array, each of dim 1 x DEC_VOCAB
     
     This is a greedy decoder - outputs are just argmaxes of output_logits.
-    """
+    
     print(output_logits[0])
     outputs = [int(np.argmax(logit, axis=1)) for logit in output_logits]
     # If there is an EOS symbol in outputs, cut them at that point.
@@ -179,6 +182,107 @@ def _construct_response(output_logits, inv_dec_vocab):
     #    outputs = outputs[:outputs.index(config.EOS_ID)]
     # Print out sentence corresponding to outputs.
     return " ".join([tf.compat.as_str(inv_dec_vocab[output]) for output in outputs])
+"""
+
+
+def greedy_decoder(sess, model, encoder_inputs, decoder_inputs, decoder_masks, bucket_id, input_token_ids, inv_dec_vocab):
+    _, _, output_logits = run_step(sess, model, encoder_inputs, decoder_inputs,
+                                         decoder_masks, bucket_id, True)    
+    
+    """ Construct a response to the user's encoder input.
+    @output_logits: the outputs from sequence to sequence wrapper.
+    output_logits is decoder_size np array, each of dim 1 x DEC_VOCAB
+    
+    This is a greedy decoder - outputs are just argmaxes of output_logits.
+    """
+
+    top_k_indices = []
+    print(output_logits[0])
+    for logit in output_logits:
+        val, indices = tf.nn.top_k(logit, k=10)
+        indices = tf.unstack(indices, axis=1)
+        top_k_word_choices = [tf.compat.as_str(inv_dec_vocab[index.eval()[0]]) for index in indices]
+        print(top_k_word_choices)
+    outputs = [int(np.argmax(logit, axis=1)) for logit in output_logits]
+    # If there is an EOS symbol in outputs, cut them at that point.
+    #if config.EOS_ID in outputs:
+    #    outputs = outputs[:outputs.index(config.EOS_ID)]
+    # Print out sentence corresponding to outputs.
+    return " ".join([tf.compat.as_str(inv_dec_vocab[output]) for output in outputs])
+
+def beam_search_decoder(sess, model, encoder_inputs, decoder_inputs, decoder_masks, bucket_id, input_token_ids, inv_dec_vocab):
+
+    debug = True
+    return_raw = True
+
+    # Get output logits for the sentence.
+    beams, new_beams, results = [(1, 0, {'eos': 0, 'dec_inp': decoder_inputs, 'prob': 1, 'prob_ts': 1, 'prob_t': 1})], [], [] # initialize beams as (log_prob, empty_string, eos)
+    dummy_encoder_inputs = [np.array([config.PAD_ID]) for _ in range(len(encoder_inputs))]
+    
+    for dptr in range(len(decoder_inputs)-1):
+      if dptr > 0: 
+        decoder_masks[dptr] = [1.]
+        beams, new_beams = new_beams[:config.BEAM_SIZE], []
+      if debug: print("=====[beams]=====", beams)
+      heapq.heapify(beams)  # since we will remove something
+      for prob, _, cand in beams:
+        #if cand['eos']: 
+         # results += [(prob, 0, cand)]
+          #continue
+
+
+        if len(cand['dec_inp']) == 40:
+          results += [(prob, 0, cand)]
+          continue
+
+        # normal seq2seq
+        if debug: print(cand['prob'], " ".join([tf.compat.as_str(inv_dec_vocab[w[0]]) for w in cand['dec_inp']]))
+
+
+
+        _, _, output_logits = run_step(sess, model, encoder_inputs, cand['dec_inp'], decoder_masks, bucket_id, True)
+        all_prob_ts = softmax(output_logits[dptr][0])
+
+        all_prob_t  = [0]*len(all_prob_ts)
+        all_prob    = all_prob_ts
+
+        # suppress copy-cat (respond the same as input)
+        #if dptr < len(input_token_ids):
+        #  all_prob[input_token_ids[dptr]] = all_prob[input_token_ids[dptr]] * 0.01
+
+        # for debug use
+        #if return_raw: print("probs ", all_prob, all_prob_ts, all_prob_t)
+        
+        # beam search  
+        for c in np.argsort(all_prob)[::-1][:config.BEAM_SIZE]:
+          new_cand = {
+            'eos'     : (config.EOS_ID),
+            'dec_inp' : [(np.array([c]) if i == (dptr+1) else k) for i, k in enumerate(cand['dec_inp'])],
+            'prob_ts' : cand['prob_ts'] * all_prob_ts[c],
+            'prob_t'  : cand['prob_t'] * all_prob_t[c],
+            'prob'    : cand['prob'] * all_prob[c],
+          }
+          new_cand = (new_cand['prob'], random.random(), new_cand) # stuff a random to prevent comparing new_cand
+          
+          try:
+            if (len(new_beams) < config.BEAM_SIZE):
+              heapq.heappush(new_beams, new_cand)
+            elif (new_cand[0] > new_beams[0][0]):
+              heapq.heapreplace(new_beams, new_cand)
+          except Exception as e:
+            print("[Error]", e)
+            print("-----[new_beams]-----\n", new_beams)
+            print("-----[new_cand]-----\n", new_cand)
+    
+    results += new_beams  # flush last cands
+    # post-process results
+    res_cands = []
+    for prob, _, cand in sorted(results, reverse=True):
+      cand['dec_inp'] = " ".join([tf.compat.as_str(inv_dec_vocab[w[0]]) for w in cand['dec_inp']])
+      res_cands.append(cand)
+
+    return res_cands[:config.BEAM_SIZE]
+
 
 def generate():
     """ in test mode, we don't to create the backward path
@@ -217,14 +321,29 @@ def generate():
                                                                             bucket_id,
                                                                             batch_size=1)
             # Get output logits for the sentence.
-            _, _, output_logits = run_step(sess, model, encoder_inputs, decoder_inputs,
-                                           decoder_masks, bucket_id, True)
-            response = _construct_response(output_logits, inv_dec_vocab)
-            print(response)
+            decoder_responses = []        
+            if config.BEAM_SEARCH:
+                cand_decoder = beam_search_decoder(sess, model, encoder_inputs, decoder_inputs, 
+                                            decoder_masks, bucket_id, token_ids, inv_dec_vocab)
+                 
+                for cand in cand_decoder:
+                    decoder_responses.append(cand['dec_inp'])
+            elif config.GREEDY:
+                decoder_responses = greedy_decoder(sess, model, encoder_inputs, decoder_inputs,
+                                           decoder_masks, bucket_id, token_ids, inv_dec_vocab)
+            else:
+                decoder_responses = temp_decoder(sess, model, encoder_inputs, decoder_inputs,
+                                           decoder_masks, bucket_id, token_ids, inv_dec_vocab)
+            
+            print("responses")
+            print(decoder_responses)
+
+        output_file.write('=============================================\n')
+        output_file.close()
 
 
 def fix_gpu_memory():
-    tf_config = tf.ConfigProto(per_process_gpu_memory_fraction=0.333)
+    tf_config = tf.ConfigProto()
     tf_config.gpu_options.allow_growth = True
     tf_config.log_device_placement = False
     tf_config.allow_soft_placement = True

@@ -24,46 +24,59 @@ import os
 import numpy as np
 
 import config
+from nltk.tokenize import sent_tokenize
+import codecs
+from collections import OrderedDict
+import itertools
+import nltk
+from nltk.util import ngrams
 
-"""
+all_chars = []
+char_indices = dict()
+indices_char  = dict()
+
+def char_encoding(text):
+    all_chars = sorted(list(set(text))) 
+    char_indices = dict((c, i) for i, c in enumerate(all_chars))
+    indices_char = dict((i, c) for i, c in enumerate(all_chars))
+    return all_chars, char_indices, indices_char
+
+def sum_char_ngram(word, n=3):
+    word_chars = [ch for ch in word]
+    char_ngrams  = ngrams(word_chars, n)
+    
+    sum_char_ngrams = []
+    
+    for char_ngram in char_ngrams:
+        print(char_ngram)
+        ngram_vector = np.zeros(len(all_chars), dtype=np.float)
+        print(len(all_chars))
+        for ch in char_ngram:
+            ngram_vector[char_indices.get(ch)] =1.0
+        sum_char_ngrams.append(ngram_vector)
+
+    return sum_char_ngrams 
+    
 def get_lines():
-    id2line = {}
+    reviews = []
     file_path = os.path.join(config.DATA_PATH, config.LINE_FILE)
-    with open(file_path, 'rb') as f:
+    with codecs.open(file_path, "r", encoding='utf8') as f:
         lines = f.readlines()
         for line in lines:
-            parts = line.split(' +++$+++ ')
-            if len(parts) == 5:
-                if parts[4][-1] == '\n':
-                    parts[4] = parts[4][:-1]
-                id2line[parts[0]] = parts[4]
-    return id2line
+            reviews.append(sent_tokenize(line))
+    return reviews
 
-def get_convos():
-    # Get conversations from the raw data 
-    file_path = os.path.join(config.DATA_PATH, config.CONVO_FILE)
-    convos = []
-    with open(file_path, 'rb') as f:
-        for line in f.readlines():
-            parts = line.split(' +++$+++ ')
-            if len(parts) == 4:
-                convo = []
-                for line in parts[3][1:-2].split(', '):
-                    convo.append(line[1:-1])
-                convos.append(convo)
+def question_answers(reviews):
+    """ Divide the dataset into two sets: questions and answers. """
+    prevSent, nextSent = [], []
+    for review in reviews:
+        for index in range(0, len(review) -2):
+            prevSent.append(review[index] + " " + review[index +1])
+            nextSent.append(review[index+2])
 
-    return convos
+    assert len(prevSent) == len(nextSent)
+    return prevSent, nextSent
 
-def question_answers(id2line, convos):
-    # Divide the dataset into two sets: questions and answers.
-    questions, answers = [], []
-    for convo in convos:
-        for index, line in enumerate(convo[:-1]):
-            questions.append(id2line[convo[index]])
-            answers.append(id2line[convo[index + 1]])
-    assert len(questions) == len(answers)
-    return questions, answers
-"""
 def prepare_dataset(questions, answers):
     # create path to store all the train & test encoder & decoder
     make_dir(config.PROCESSED_PATH)
@@ -74,7 +87,7 @@ def prepare_dataset(questions, answers):
     filenames = ['train.enc', 'train.dec', 'test.enc', 'test.dec']
     files = []
     for filename in filenames:
-        files.append(open(os.path.join(config.PROCESSED_PATH, filename),'wb'))
+        files.append(codecs.open(os.path.join(config.PROCESSED_PATH, filename),'wb', encoding='utf8'))
 
     for i in range(len(questions)):
         if i in test_ids:
@@ -102,7 +115,7 @@ def basic_tokenizer(line, normalize_digits=True):
     line = re.sub('\[', '', line)
     line = re.sub('\]', '', line)
     words = []
-    _WORD_SPLIT = re.compile(b"([.,!?\"'-<>:;)(])")
+    _WORD_SPLIT = re.compile(b"([.,!?\"'-:;)(])")
     _DIGIT_RE = re.compile(r"\d")
     for fragment in line.strip().lower().split():
         for token in re.split(_WORD_SPLIT, fragment):
@@ -126,11 +139,13 @@ def build_vocab(filename, normalize_digits=True):
                 vocab[token] += 1
 
     sorted_vocab = sorted(vocab, key=vocab.get, reverse=True)
+#    sorted_vocab  = OrderedDict(itertools.islice(sorted_vocab.iteritems(), config.VOCAB_SIZE))
+    sorted_vocab = sorted_vocab[config.VOCAB_SIZE: ]
     with open(out_path, 'wb') as f:
         f.write('<pad>' + '\n')
         f.write('<unk>' + '\n')
-        f.write('<s>' + '\n')
-        f.write('<\s>' + '\n') 
+        f.write('<SOR>' + '\n')
+        f.write('<EOR>' + '\n') 
         index = 4
         for word in sorted_vocab:
             if vocab[word] < config.THRESHOLD:
@@ -165,20 +180,19 @@ def token2id(data, mode):
     lines = in_file.read().splitlines()
     for line in lines:
         if mode == 'dec': # we only care about '<s>' and </s> in encoder
-            ids = [vocab['<s>']]
+            ids = [vocab['<SOR>']]
         else:
             ids = []
         ids.extend(sentence2id(vocab, line))
         # ids.extend([vocab.get(token, vocab['<unk>']) for token in basic_tokenizer(line)])
         if mode == 'dec':
-            ids.append(vocab['<\s>'])
+            ids.append(vocab['<EOR>'])
         out_file.write(' '.join(str(id_) for id_ in ids) + '\n')
 
 def prepare_raw_data():
     print('Preparing raw data into train set and test set ...')
-    id2line = get_lines()
-    convos = get_convos()
-    questions, answers = question_answers(id2line, convos)
+    reviews = get_lines()
+    questions, answers = question_answers(reviews)
     prepare_dataset(questions, answers)
 
 def process_data():
@@ -197,7 +211,7 @@ def load_data(enc_filename, dec_filename, max_training_size=None):
     data_buckets = [[] for _ in config.BUCKETS]
     i = 0
     while encode and decode:
-        if (i + 1) % 10000 == 0:
+        if (i + 1) % 100000 == 0:
             print("Bucketing conversation number", i)
         encode_ids = [int(id_) for id_ in encode.split()]
         decode_ids = [int(id_) for id_ in decode.split()]
@@ -253,5 +267,10 @@ def get_batch(data_bucket, bucket_id, batch_size=1):
     return batch_encoder_inputs, batch_decoder_inputs, batch_masks
 
 if __name__ == '__main__':
-    prepare_raw_data()
-    process_data()
+    #prepare_raw_data()
+    #process_data()
+    text = "abcdef"
+    all_chars, char_indices, indices_char = char_encoding(text)
+
+    sum_char_ngram("def")
+    #print(sum_char_ngram("def"))

@@ -1,14 +1,3 @@
-'''Example script to generate text from Nietzsche's writings.
-
-At least 20 epochs are required before the generated text
-starts sounding coherent.
-
-It is recommended to run this script on GPU, as recurrent
-networks are quite computationally intensive.
-
-If you try this script on new data, make sure your corpus
-has at least ~100k characters. ~1M is better.
-'''
 
 from __future__ import print_function
 from keras.models import Sequential
@@ -16,13 +5,40 @@ from keras.layers import Dense, Activation
 from keras.layers import LSTM
 from keras.optimizers import Adam
 from keras.utils.data_utils import get_file
+from keras.models import load_model
+
 import numpy as np
 import random
 import sys
 import keras.backend as K
+from keras.callbacks import ModelCheckpoint
+from keras.callbacks import Callback
+import logging
+from sklearn.model_selection import train_test_split
 
-maxlen = 40
-step = 3
+maxlen = 200
+step = 1
+maxChars = 7000000
+num_layers = 2
+hidden_size = 1024
+batch_size = 256
+iterations = 10
+epochs = 2
+learning_rate = 0.002
+max_sample_chars = 400
+#maxChars = 20000
+class LoggingCallback(Callback):
+    """Callback that logs message at end of epoch.
+    """
+
+    def __init__(self, print_fcn=print):
+        Callback.__init__(self)
+        self.print_fcn = print_fcn
+
+    def on_epoch_end(self, epoch, logs={}):
+        msg = "Epoch: %i, %s" % (epoch, ", ".join("%s: %f" % (k, v) for k, v in logs.iteritems()))
+        self.print_fcn(msg)
+
 
 def fix_gpu_memory():
     tf_config = K.tf.ConfigProto()
@@ -41,11 +57,12 @@ with K.tf.device('/gpu:0'):
 
     fix_gpu_memory()
  
-    #path = get_file('nietzsche.txt', origin='https://s3.amazonaws.com/text-datasets/nietzsche.txt')
     path = 'yelp_review_data'
-    text = open(path).read().lower()
+    file = open(path)
+    text = file.read(maxChars).lower()
+    file.close()
     print('corpus length:', len(text))
-
+    corp_length = len(text)
     chars = sorted(list(set(text)))
     print('total chars:', len(chars))
     char_indices = dict((c, i) for i, c in enumerate(chars))
@@ -55,12 +72,18 @@ with K.tf.device('/gpu:0'):
     
     sentences = []
     next_chars = []
-    for i in range(0, len(text) - maxlen, step):
+    for i in range(0, corp_length - maxlen, step):
         sentences.append(text[i: i + maxlen])
         next_chars.append(text[i + maxlen])
     print('nb sequences:', len(sentences))
-    
 
+    del text    
+
+    seed = 7
+    np.random.seed(seed)
+    train_sentences, val_sentences, train_next_chars, val_next_chars = train_test_split(sentences, 
+                        next_chars, test_size=0.15, random_state=seed) 
+   
     def batch_gen(sentences, next_chars, batch_size):
         
         X = np.zeros((batch_size, maxlen, len(chars)), dtype=np.bool)
@@ -73,16 +96,22 @@ with K.tf.device('/gpu:0'):
                 y[i, char_indices[next_chars[i]]] = 1
             yield X, y
 
-    # build the model: a single LSTM
+
     print('Build model...')
-    model = Sequential()
-    model.add(LSTM(1024, input_shape=(maxlen, len(chars))))
-    model.add(Dense(len(chars)))
-    model.add(Activation('softmax'))
-
-    optimizer = Adam(lr=0.002, decay=0.96 )
+    model = None
+    #loading presaved model example
+    model = load_model('lstm_text_generator_12.h5')
+    if model is None:
+        print("model didnt get loaded")
+        model = Sequential()
+        model.add(LSTM(hidden_size, input_shape=(maxlen, len(chars))))
+        model.add(Dense(len(chars)))
+        model.add(Activation('softmax'))
+    
+    optimizer = Adam(lr=learning_rate, decay=0.96 )
     model.compile(loss='categorical_crossentropy', optimizer=optimizer)
-
+    
+    print('lr', K.get_value(model.optimizer.lr))
 
     def sample(preds, temperature=1.0):
         # helper function to sample an index from a probability array
@@ -94,26 +123,33 @@ with K.tf.device('/gpu:0'):
         return np.argmax(probas)
 
     # train the model, output generated text after each iteration
-    for iteration in range(1, 60):
+    for iteration in range(1, iterations):
         print()
         print('-' * 50)
         print('Iteration', iteration)
-        model.fit_generator(batch_gen(sentences, next_chars, 256), steps_per_epoch =len(sentences)/128,
-                  epochs=1)
-        model.save('lstm_text_generator_' + iteration + '.h5')
-        start_index = random.randint(0, len(text) - maxlen - 1)
+        print('lr', K.get_value(model.optimizer.lr))
+        checkpointer = ModelCheckpoint(filepath="/checkpoints/weights.hdf5", verbose=1, save_best_only=True)
+        model.fit_generator(batch_gen(train_sentences, train_next_chars, batch_size), 
+                        steps_per_epoch =len(sentences)/batch_size, epochs=epochs, 
+                        callbacks=[checkpointer, LoggingCallback(logging.info)])
+        model.save('lstm_text_generator_' + str(iteration + 12) + '.h5')
+        start_index = random.randint(0, corp_length - maxlen - 1)
 
-        for diversity in [0.2, 0.5, 1.0, 1.2]:
+        val_loss = model.evaluate_generator(batch_gen(val_sentences, val_next_chars, batch_size),
+                        20) 
+        print("val_loss: ", val_loss)
+        for diversity in [0.2, 0.5, 0.7, 0.9, 1.0, 1.2]:
             print()
             print('----- diversity:', diversity)
 
             generated = ''
-            sentence = text[start_index: start_index + maxlen]
+            #sentence = text[start_index: start_index + maxlen]
+            sentence = "<sor> food"
             generated += sentence
             print('----- Generating with seed: "' + sentence + '"')
             sys.stdout.write(generated)
 
-            for i in range(400):
+            for i in range(max_sample_chars):
                 x = np.zeros((1, maxlen, len(chars)))
                 for t, char in enumerate(sentence):
                     x[0, t, char_indices[char]] = 1.

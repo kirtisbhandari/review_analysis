@@ -5,6 +5,7 @@ import random
 import numpy as np
 
 from beam import BeamSearch
+import gc
 
 class Model():
     def __init__(self, args, infer=False):
@@ -76,12 +77,15 @@ class Model():
         self.cost = tf.reduce_sum(loss) / args.batch_size / args.seq_length
         tf.summary.scalar("cost", self.cost)
         self.final_state = last_state
-        self.lr = tf.Variable(0.0, trainable=False)
+        self.global_step = tf.Variable(0, dtype=tf.int32, trainable=False, name='global_step')
+        self.lr =  tf.train.exponential_decay(args.learning_rate, self.global_step,
+                                           100000, args.decay_rate , staircase=True)
         tvars = tf.trainable_variables()
         grads, _ = tf.clip_by_global_norm(tf.gradients(self.cost, tvars),
                 args.grad_clip)
         optimizer = tf.train.AdamOptimizer(self.lr)
-        self.train_op = optimizer.apply_gradients(zip(grads, tvars))
+        self.train_op = optimizer.apply_gradients(zip(grads, tvars), global_step=self.global_step)
+        gc.collect()
 
     def sample(self, sess, words, vocab, num=200, prime='first all', sampling_type=1, pick=0, width=4):
         def weighted_pick(weights):
@@ -152,4 +156,5 @@ class Model():
             pred = beam_search_pick(prime, width)
             for i, label in enumerate(pred):
                 ret += ' ' + words[label] if i > 0 else words[label]
+        gc.collect()
         return ret
